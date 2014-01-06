@@ -17,7 +17,6 @@ Gem::Specification.new do |gem|
   gem.test_files    = gem.files.grep(%r{^(test|spec|features)/})
 
   gem.add_runtime_dependency "zk", "~> 1.9.2"
-  gem.add_runtime_dependency "docker-api", "~> 1.7.2"
 
   gem.add_development_dependency "rspec"
   gem.add_development_dependency "pry"
