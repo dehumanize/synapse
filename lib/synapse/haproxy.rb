@@ -1,7 +1,5 @@
 require 'synapse/log'
-
 require 'socket'
-require 'digest'
 
 module Synapse
   class Haproxy
@@ -545,16 +543,33 @@ module Synapse
     # generates a new config based on the state of the watchers
     def generate_config(watchers)
       new_config = generate_base_config
+      shared_frontend_lines = generate_shared_frontend
 
       watchers.each do |watcher|
         @watcher_configs[watcher.name] ||= parse_watcher_config(watcher)
-
         new_config << generate_frontend_stanza(watcher, @watcher_configs[watcher.name]['frontend'])
         new_config << generate_backend_stanza(watcher, @watcher_configs[watcher.name]['backend'])
+        if watcher.haproxy.include?('shared_frontend')
+          if @opts['shared_frontend'] == nil
+            log.warn "synapse: service #{watcher.name} contains a shared frontend section but the base config does not! skipping."
+          else
+            shared_frontend_lines << validate_haproxy_stanza(watcher.haproxy['shared_frontend'].map{|l| "\t#{l}"}, "frontend", "shared frontend section for #{watcher.name}")
+          end
+        end
       end
+      new_config << shared_frontend_lines.flatten if shared_frontend_lines
 
       log.debug "synapse: new haproxy config: #{new_config}"
       return new_config.flatten.join("\n")
+    end
+
+    # pull out the shared frontend section if any
+    def generate_shared_frontend
+      return nil unless @opts.include?('shared_frontend')
+      log.debug "synapse: found a shared frontend section"
+      shared_frontend_lines = ["\nfrontend shared-frontend"]
+      shared_frontend_lines << validate_haproxy_stanza(@opts['shared_frontend'].map{|l| "\t#{l}"}, "frontend", "shared frontend")
+      return shared_frontend_lines
     end
 
     # generates the global and defaults sections of the config file
@@ -595,18 +610,22 @@ module Synapse
           })
 
         # pick only those fields that are valid and warn about the invalid ones
-        config[section].select!{|setting|
-          parsed_setting = setting.strip.gsub(/\s+/, ' ').downcase
-          if @@section_fields[section].any? {|field| parsed_setting.start_with?(field)}
-            true
-          else
-            log.warn "synapse: service #{watcher.name} contains invalid #{section} setting: '#{setting}'"
-            false
-          end
-        }
+        config[section] = validate_haproxy_stanza(config[section], section, watcher.name)
       end
 
       return config
+    end
+
+    def validate_haproxy_stanza(stanza, stanza_type, service_name)
+      return stanza.select {|setting|
+        parsed_setting = setting.strip.gsub(/\s+/, ' ').downcase
+        if @@section_fields[stanza_type].any? {|field| parsed_setting.start_with?(field)}
+          true
+        else
+          log.warn "synapse: service #{service_name} contains invalid #{stanza_type} setting: '#{setting}', discarding"
+          false
+        end
+      }
     end
 
     # generates an individual stanza for a particular watcher
@@ -619,7 +638,7 @@ module Synapse
       stanza = [
         "\nfrontend #{watcher.name}",
         config.map {|c| "\t#{c}"},
-        "\tbind localhost:#{watcher.haproxy['port']}",
+        "\tbind #{@opts['bind_address'] || 'localhost'}:#{watcher.haproxy['port']}",
         "\tdefault_backend #{watcher.name}"
       ]
     end
@@ -644,7 +663,7 @@ module Synapse
       # first, get a list of existing servers for various backends
       begin
         s = UNIXSocket.new(@opts['socket_file_path'])
-        s.write('show stat;')
+        s.write("show stat\n")
         info = s.read()
       rescue StandardError => e
         log.warn "synapse: unhandled error reading stats socket: #{e.inspect}"
@@ -692,9 +711,9 @@ module Synapse
       cur_backends.each do |section, backends|
         backends.each do |backend|
           if enabled_backends[section].include? backend
-            command = "enable server #{section}/#{backend};"
+            command = "enable server #{section}/#{backend}\n"
           else
-            command = "disable server #{section}/#{backend};"
+            command = "disable server #{section}/#{backend}\n"
           end
 
           # actually write the command to the socket
@@ -715,6 +734,8 @@ module Synapse
           end
         end
       end
+
+      log.info "synapse: reconfigured haproxy"
     end
 
     # writes the config
@@ -743,6 +764,7 @@ module Synapse
       # do the actual restart
       res = `#{opts['reload_command']}`.chomp
       raise "failed to reload haproxy via #{opts['reload_command']}: #{res}" unless $?.success?
+      log.info "synapse: restarted haproxy"
 
       @last_restart = Time.now()
       @restart_required = false
@@ -750,8 +772,12 @@ module Synapse
 
     # used to build unique, consistent haproxy names for backends
     def construct_name(backend)
-      address_digest = Digest::SHA256.hexdigest(backend['host'])[0..7]
-      return "#{backend['name']}:#{backend['port']}_#{address_digest}"
+      name = "#{backend['host']}:#{backend['port']}"
+      if backend['name'] && !backend['name'].empty?
+        name = "#{name}_#{backend['name']}"
+      end
+
+      return name
     end
   end
 end

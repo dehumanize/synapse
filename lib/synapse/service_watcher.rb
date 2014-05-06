@@ -7,9 +7,9 @@ module Synapse
   class ServiceWatcher
 
     @watchers = {
-      'base'=>BaseWatcher,
-      'zookeeper'=>ZookeeperWatcher,
-      'ec2tag'=>EC2Watcher,
+      'base' => BaseWatcher,
+      'zookeeper' => ZookeeperWatcher,
+      'ec2tag' => EC2Watcher,
       'dns' => DnsWatcher,
     }
 
